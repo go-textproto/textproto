@@ -13,6 +13,8 @@ import (
 	"strings"
 	"sync"
 	"unsafe"
+
+	"gopkg.in/option.v0"
 )
 
 // A Reader implements convenience methods for reading requests
@@ -292,6 +294,12 @@ func (r *Reader) ReadResponse(expectCode int) (code int, message string, err err
 	return
 }
 
+type DotReaderOption func(*dotReader)
+
+var DisableDotDecoding DotReaderOption = func(d *dotReader) {
+	d.disableDotDecoding = true
+}
+
 // DotReader returns a new Reader that satisfies Reads using the
 // decoded text of a dot-encoded block read from r.
 // The returned Reader is only valid until the next call
@@ -308,48 +316,61 @@ func (r *Reader) ReadResponse(expectCode int) (code int, message string, err err
 // rewrites the "\r\n" line endings into the simpler "\n",
 // removes leading dot escapes if present, and stops with error io.EOF
 // after consuming (and discarding) the end-of-sequence line.
-func (r *Reader) DotReader() io.Reader {
+func (r *Reader) DotReader(options ...DotReaderOption) io.Reader {
 	r.closeDot()
-	r.dot = &dotReader{r: r}
+	r.dot = option.Apply(&dotReader{R: r.R, r: r}, options)
 	return r.dot
 }
 
-type dotReader struct {
-	r     *Reader
-	state int
+func DotReader(r *bufio.Reader, options ...DotReaderOption) io.Reader {
+	return option.Apply(&dotReader{R: r}, options)
 }
 
+type dotReader struct {
+	R                  *bufio.Reader
+	r                  *Reader
+	state              int
+	disableDotDecoding bool
+}
+
+// A nasty hack to "unread" a number of bytes from a bufio.Reader.
+// This is NOT PORTABLE if the struct of bufio.Reader changes.
 func unread(r *bufio.Reader, n int) {
 	(*struct {
-		buf          []byte
-		rd           io.Reader
-		r, w         int
-		err          error
-		lastByte     int
-		lastRuneSize int
+		buf []byte
+		rd  io.Reader
+		r   int
+		// we only need the fields up to "r"
 	})(unsafe.Pointer(r)).r -= n
 }
+
+const (
+	rstateBeginLine = iota // beginning of line; initial state; must be zero
+	rstateDot              // read . at beginning of line
+	rstateDotCR            // read .\r at beginning of line
+	rstateCR               // read \r (possibly at end of line)
+	rstateData             // reading data in middle of line
+	rstateEOF              // reached .\r\n end marker line
+)
 
 // Read satisfies reads by decoding dot-encoded data read from d.r.
 func (d *dotReader) Read(b []byte) (n int, err error) {
 	// Run data through a simple state machine to
 	// elide leading dots, rewrite trailing \r\n into \n,
 	// and detect ending .\r\n line.
-	const (
-		stateBeginLine = iota // beginning of line; initial state; must be zero
-		stateDot              // read . at beginning of line
-		stateDotCR            // read .\r at beginning of line
-		stateCR               // read \r (possibly at end of line)
-		stateData             // reading data in middle of line
-		stateEOF              // reached .\r\n end marker line
-	)
-	br := d.r.R
 	var (
-		i, j int
-		line []byte
-		lLen int
+		i, j   int
+		line   []byte
+		lLen   int
+		br     = d.R
+		decode = !d.disableDotDecoding
 	)
-	for len(b) > 0 && d.state != stateEOF {
+	defer func() {
+		if (err != nil || d.state == rstateEOF) && d.r != nil {
+			d.r.dot = nil
+		}
+	}()
+	for len(b) > 0 && d.state != rstateEOF {
 		line, err = br.ReadSlice('\n')
 		i, lLen = 0, len(line)
 		if len(b) < lLen {
@@ -358,32 +379,39 @@ func (d *dotReader) Read(b []byte) (n int, err error) {
 		}
 		j = lLen
 		if lLen > 0 {
-			if (d.state == stateBeginLine && lLen == 3 && *(*[3]byte)(unsafe.Pointer(&line[0])) == [3]byte{'.', '\r', '\n'}) ||
-				(d.state == stateDot && lLen == 2 && *(*[2]byte)(unsafe.Pointer(&line[0])) == [2]byte{'.', '\r'}) ||
-				((d.state == stateDot || d.state == stateDotCR) && lLen == 1 && line[0] == '\n') {
-				d.state = stateEOF
-				if d.r.dot == d {
-					d.r.dot = nil
+			if (d.state == rstateBeginLine && lLen == 3 && *(*[3]byte)(unsafe.Pointer(&line[0])) == [3]byte{'.', '\r', '\n'}) ||
+				(d.state == rstateDot && lLen == 2 && *(*[2]byte)(unsafe.Pointer(&line[0])) == [2]byte{'.', '\r'}) ||
+				((d.state == rstateDot || d.state == rstateDotCR) && lLen == 1 && line[0] == '\n') {
+				d.state = rstateEOF
+				if !decode {
+					copy(b, line)
+					n += lLen
 				}
 				return
 			}
-			if d.state == stateBeginLine && lLen >= 1 && line[0] == '.' {
-				i = 1
+			if d.state == rstateBeginLine && lLen >= 1 && line[0] == '.' {
 				if lLen == 1 {
-					d.state = stateDot
+					d.state = rstateDot
+				}
+				if decode {
+					i = 1
 				}
 			}
 			if lLen >= 2 && *(*[2]byte)(unsafe.Pointer(&line[lLen-2])) == [2]byte{'\r', '\n'} {
-				line[lLen-2] = '\n'
-				j--
-				d.state = stateBeginLine
-			} else if (d.state == stateCR && lLen == 1 && line[0] == '\n') || (line[lLen-1] == '\n') {
-				d.state = stateBeginLine
+				d.state = rstateBeginLine
+				if decode {
+					line[lLen-2] = '\n'
+					j--
+				}
+			} else if (d.state == rstateCR && lLen == 1 && line[0] == '\n') || line[lLen-1] == '\n' {
+				d.state = rstateBeginLine
 			} else if line[lLen-1] == '\r' {
-				j--
-				d.state = stateCR
+				d.state = rstateCR
+				if decode {
+					j--
+				}
 			} else {
-				d.state = stateData
+				d.state = rstateData
 			}
 			lLen = j - i
 			if lLen > 0 {
@@ -396,16 +424,122 @@ func (d *dotReader) Read(b []byte) (n int, err error) {
 			break
 		}
 	}
-	if d.state == stateEOF && n == 0 && err == nil {
+	if d.state == rstateEOF && n == 0 && err == nil {
 		err = io.EOF
 	}
 	if err == io.EOF && n > 0 {
 		err = io.ErrUnexpectedEOF
 	}
-	if d.r.dot == d {
-		d.r.dot = nil
-	}
 	return
+}
+
+func (d *dotReader) WriteTo(w io.Writer) (n int64, err error) {
+	var (
+		ok     bool
+		bw     *bufio.Writer
+		b      []byte
+		bLen   int
+		x      int
+		r      = d.R
+		decode = !d.disableDotDecoding
+	)
+	if bw, ok = w.(*bufio.Writer); !ok {
+		bw = bufio.NewWriter(w)
+	}
+	defer func() {
+		if e := bw.Flush(); e != nil && err == nil {
+			err = e
+		}
+		if d.r != nil {
+			d.r.dot = nil
+		}
+	}()
+	for {
+		b, err = r.ReadSlice('\n')
+		bLen = len(b)
+		if err != bufio.ErrBufferFull && d.state == rstateBeginLine {
+			// this is the usual case, and we can do it faster
+			if bLen == 3 && *(*[3]byte)(unsafe.Pointer(&b[0])) == [3]byte{'.', '\r', '\n'} {
+				if !decode {
+					x, err = bw.Write(b)
+					n += int64(x)
+				}
+				return
+			}
+			if bLen >= 1 && b[0] == '.' && decode {
+				bLen -= 1
+				b = b[1:]
+			}
+			if bLen >= 2 && *(*[2]byte)(unsafe.Pointer(&b[bLen-2])) == [2]byte{'\r', '\n'} {
+				if decode {
+					b[bLen-2] = '\n'
+					x, err = bw.Write(b[:bLen-1])
+				} else {
+					x, err = bw.Write(b)
+				}
+				n += int64(x)
+				if err != nil {
+					return
+				}
+			} else if bLen > 0 {
+				x, _ = bw.Write(b)
+				n += int64(x)
+			}
+		} else {
+			// this is uncommon since the line length exceeds bufio.Reader buffer size
+			if err == bufio.ErrBufferFull {
+				err = nil
+			}
+			if (d.state == rstateBeginLine && bLen == 3 && *(*[3]byte)(unsafe.Pointer(&b[0])) == [3]byte{'.', '\r', '\n'}) ||
+				(d.state == rstateDot && bLen == 2 && *(*[2]byte)(unsafe.Pointer(&b[0])) == [2]byte{'.', '\r'}) ||
+				((d.state == rstateDot || d.state == rstateDotCR) && bLen == 1 && b[0] == '\n') {
+				d.state = rstateEOF
+				if !decode {
+					x, err = bw.Write(b)
+					n += int64(x)
+				}
+				return
+			}
+			if d.state == rstateBeginLine && bLen >= 1 && b[0] == '.' {
+				if bLen == 1 {
+					d.state = rstateDot
+				}
+				if decode {
+					b = b[1:]
+					bLen--
+				}
+			}
+			if bLen >= 2 && *(*[2]byte)(unsafe.Pointer(&b[bLen-2])) == [2]byte{'\r', '\n'} {
+				d.state = rstateBeginLine
+				if decode {
+					b[bLen-2] = '\n'
+					bLen--
+				}
+			} else if (d.state == rstateCR && bLen == 1 && b[0] == '\n') || (b[bLen-1] == '\n') {
+				d.state = rstateBeginLine
+			} else if b[bLen-1] == '\r' {
+				d.state = rstateCR
+				if decode {
+					bLen--
+				}
+			} else {
+				d.state = rstateData
+			}
+			if bLen > 0 {
+				x, err = bw.Write(b[:bLen])
+				n += int64(x)
+				if err != nil {
+					return
+				}
+			}
+		}
+		if err != nil {
+			if err == io.EOF {
+				err = io.ErrUnexpectedEOF
+			}
+			return
+		}
+	}
 }
 
 // closeDot drains the current DotReader if any,
@@ -414,18 +548,13 @@ func (r *Reader) closeDot() {
 	if r.dot == nil {
 		return
 	}
-	buf := make([]byte, 128)
-	for r.dot != nil {
-		// When Read reaches EOF or an error,
-		// it will set r.dot == nil.
-		r.dot.Read(buf)
-	}
+	io.Copy(io.Discard, r.dot)
 }
 
 // ReadDotBytes reads a dot-encoding and returns the decoded data.
 //
 // See the documentation for the DotReader method for details about dot-encoding.
-func (r *Reader) ReadDotBytes() ([]byte, error) {
+func (r *Reader) ReadDotBytes() (b []byte, err error) {
 	return io.ReadAll(r.DotReader())
 }
 

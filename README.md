@@ -8,8 +8,8 @@
 The Golang standard library `net/textproto` suffers in data throughput performance when using its `DotReader` or `DotWriter` implementations. It's caused by iterating each input output byte using the `ReadByte` or `WriteByte` functions. This increases a lot of CPU cycles for accessing memory for each byte. This module aim to provide an optimized implementation by leveraging the SIMD optimized `ReadSlice` and `IndexByte` functions. Here are the resulting numbers:
 
 ```
-BenchmarkDotReader/Legacy-12                  62          21610894 ns/op         194.08 MB/s
-BenchmarkDotReader/Optimized-12             1486            821764 ns/op        5104.02 MB/s
-BenchmarkDotWriter/Legacy-12                  56          19386652 ns/op         216.35 MB/s
-BenchmarkDotWriter/Optimized-12             1694            700181 ns/op        5990.31 MB/s
+BenchmarkDotReader/Legacy-10                  72          15078444 ns/op         278.17 MB/s
+BenchmarkDotReader/Optimized-10             1752            653339 ns/op        6419.79 MB/s
+BenchmarkDotWriter/Legacy-10                 100          10760824 ns/op         389.78 MB/s
+BenchmarkDotWriter/Optimized-10             2116            553493 ns/op        7577.88 MB/s
 ```

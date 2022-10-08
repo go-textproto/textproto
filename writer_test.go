@@ -23,18 +23,35 @@ func TestPrintfLine(t *testing.T) {
 }
 
 func TestDotWriter(t *testing.T) {
-	var buf bytes.Buffer
-	w := NewWriter(bufio.NewWriter(&buf))
-	d := w.DotWriter()
-	n, err := d.Write([]byte("abc\n.def\n..ghi\n.jkl\n."))
-	if n != 21 || err != nil {
-		t.Fatalf("Write: %d, %s", n, err)
-	}
-	d.Close()
-	want := "abc\r\n..def\r\n...ghi\r\n..jkl\r\n..\r\n.\r\n"
-	if s := buf.String(); s != want {
-		t.Fatalf("wrote %q", s)
-	}
+	t.Run("Encode", func(t *testing.T) {
+		var buf bytes.Buffer
+		w := NewWriter(bufio.NewWriter(&buf))
+		d := w.DotWriter()
+		n, err := d.Write([]byte("abc\n.def\n..ghi\n.jkl\n."))
+		if n != 21 || err != nil {
+			t.Fatalf("Write: %d, %s", n, err)
+		}
+		d.Close()
+		want := "abc\r\n..def\r\n...ghi\r\n..jkl\r\n..\r\n.\r\n"
+		if s := buf.String(); s != want {
+			t.Fatalf("wrote %q", s)
+		}
+	})
+
+	t.Run("NoEncode", func(t *testing.T) {
+		var buf bytes.Buffer
+		w := NewWriter(bufio.NewWriter(&buf))
+		d := w.DotWriter(DisableDotEncoding)
+		n, err := d.Write([]byte("abc\n.def\n..ghi\n.jkl\n."))
+		if n != 21 || err != nil {
+			t.Fatalf("Write: %d, %s", n, err)
+		}
+		d.Close()
+		want := "abc\r\n.def\r\n..ghi\r\n.jkl\r\n.\r\n.\r\n"
+		if s := buf.String(); s != want {
+			t.Fatalf("wrote %q", s)
+		}
+	})
 }
 
 func TestDotWriterCloseEmptyWrite(t *testing.T) {

@@ -10,6 +10,8 @@ import (
 	"fmt"
 	"io"
 	"unsafe"
+
+	"gopkg.in/option.v0"
 )
 
 // A Writer implements convenience methods for writing
@@ -35,6 +37,12 @@ func (w *Writer) PrintfLine(format string, args ...any) error {
 	return w.W.Flush()
 }
 
+type DotWriterOption func(*dotWriter)
+
+var DisableDotEncoding DotWriterOption = func(d *dotWriter) {
+	d.disableDotEncoding = true
+}
+
 // DotWriter returns a writer that can be used to write a dot-encoding to w.
 // It takes care of inserting leading dots when necessary,
 // translating line-ending \n into \r\n, and adding the final .\r\n line
@@ -42,9 +50,9 @@ func (w *Writer) PrintfLine(format string, args ...any) error {
 // DotWriter before the next call to a method on w.
 //
 // See the documentation for Reader's DotReader method for details about dot-encoding.
-func (w *Writer) DotWriter() io.WriteCloser {
+func (w *Writer) DotWriter(options ...DotWriterOption) io.WriteCloser {
 	w.closeDot()
-	w.dot = &dotWriter{w: w}
+	w.dot = option.Apply(&dotWriter{W: w.W, w: w}, options)
 	return w.dot
 }
 
@@ -55,8 +63,14 @@ func (w *Writer) closeDot() {
 }
 
 type dotWriter struct {
-	w     *Writer
-	state int
+	W                  *bufio.Writer
+	w                  *Writer
+	state              int
+	disableDotEncoding bool
+}
+
+func DotWriter(w *bufio.Writer, options ...DotWriterOption) io.WriteCloser {
+	return option.Apply(&dotWriter{W: w}, options)
 }
 
 const (
@@ -68,10 +82,11 @@ const (
 
 func (d *dotWriter) Write(b []byte) (n int, err error) {
 	var (
-		i    int
-		p    []byte
-		pLen int
-		bw   = d.w.W
+		i      int
+		p      []byte
+		pLen   int
+		bw     = d.W
+		encode = !d.disableDotEncoding
 	)
 	for len(b) > 0 {
 		i = bytes.IndexByte(b, '\n')
@@ -81,7 +96,7 @@ func (d *dotWriter) Write(b []byte) (n int, err error) {
 			p, b = b, nil
 		}
 		pLen = len(p)
-		if d.state == wstateBeginLine && p[0] == '.' {
+		if encode && d.state == wstateBeginLine && p[0] == '.' {
 			err = bw.WriteByte('.')
 			if err != nil {
 				return
@@ -89,26 +104,26 @@ func (d *dotWriter) Write(b []byte) (n int, err error) {
 		}
 		if (pLen >= 2 && *(*[2]byte)(unsafe.Pointer(&p[pLen-2])) == [2]byte{'\r', '\n'}) ||
 			(d.state == wstateCR && pLen == 1 && p[0] == '\n') {
+			d.state = wstateBeginLine
 			if _, err = bw.Write(p); err != nil {
 				return
 			}
-			d.state = wstateBeginLine
 		} else if pLen >= 1 && p[pLen-1] == '\n' {
+			d.state = wstateBeginLine
 			_, _ = bw.Write(p[:pLen-1])
 			if _, err = bw.Write(crnl); err != nil {
 				return
 			}
-			d.state = wstateBeginLine
 		} else if pLen >= 1 && p[pLen-1] == '\r' {
+			d.state = wstateCR
 			if _, err = bw.Write(p[:pLen-1]); err != nil {
 				return
 			}
-			d.state = wstateCR
 		} else {
+			d.state = wstateData
 			if _, err = bw.Write(p); err != nil {
 				return
 			}
-			d.state = wstateData
 		}
 		n += pLen
 	}
@@ -116,10 +131,10 @@ func (d *dotWriter) Write(b []byte) (n int, err error) {
 }
 
 func (d *dotWriter) Close() error {
-	if d.w.dot == d {
+	if d.w != nil && d.w.dot == d {
 		d.w.dot = nil
 	}
-	bw := d.w.W
+	bw := d.W
 	switch d.state {
 	default:
 		bw.WriteByte('\r')

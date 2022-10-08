@@ -95,19 +95,40 @@ func TestReadDotLines(t *testing.T) {
 	}
 }
 
-func TestReadDotBytes(t *testing.T) {
-	r := reader("dotlines\r\n.foo\r\n..bar\n...baz\nquux\r\n\r\n.\r\nanot.her\r\n")
-	b, err := r.ReadDotBytes()
-	want := []byte("dotlines\nfoo\n.bar\n..baz\nquux\n\n")
-	if !reflect.DeepEqual(b, want) || err != nil {
-		t.Fatalf("ReadDotBytes: %q, %v", b, err)
-	}
+func TestDotReader(t *testing.T) {
+	t.Run("Decode", func(t *testing.T) {
+		buf := bufio.NewReader(strings.NewReader("dotlines\r\n.foo\r\n..bar\n...baz\nquux\r\n\r\n.\r\nanot.her\n"))
+		r := DotReader(buf)
+		b, err := io.ReadAll(r)
+		want := []byte("dotlines\nfoo\n.bar\n..baz\nquux\n\n")
+		if !reflect.DeepEqual(b, want) || err != nil {
+			t.Fatalf("ReadDotBytes: %q, %v", b, err)
+		}
 
-	b, err = r.ReadDotBytes()
-	want = []byte("anot.her\n")
-	if !reflect.DeepEqual(b, want) || err != io.ErrUnexpectedEOF {
-		t.Fatalf("ReadDotBytes2: %q, %v", b, err)
-	}
+		r = DotReader(buf)
+		b, err = io.ReadAll(r)
+		want = []byte("anot.her\n")
+		if !reflect.DeepEqual(b, want) || err != io.ErrUnexpectedEOF {
+			t.Fatalf("ReadDotBytes2: %q, %v", b, err)
+		}
+	})
+
+	t.Run("NoDecode", func(t *testing.T) {
+		buf := bufio.NewReader(strings.NewReader("dotlines\r\n.foo\r\n..bar\n...baz\nquux\r\n\r\n.\r\nanot.her\n"))
+		r := DotReader(buf, DisableDotDecoding)
+		b, err := io.ReadAll(r)
+		want := []byte("dotlines\r\n.foo\r\n..bar\n...baz\nquux\r\n\r\n.\r\n")
+		if !reflect.DeepEqual(b, want) || err != nil {
+			t.Fatalf("ReadDotBytes: %q, %v", b, err)
+		}
+
+		r = DotReader(buf, DisableDotDecoding)
+		b, err = io.ReadAll(r)
+		want = []byte("anot.her\n")
+		if !reflect.DeepEqual(b, want) || err != io.ErrUnexpectedEOF {
+			t.Fatalf("ReadDotBytes2: %q, %v", b, err)
+		}
+	})
 }
 
 func TestReadMIMEHeader(t *testing.T) {
@@ -441,7 +462,7 @@ func BenchmarkDotReader(b *testing.B) {
 		b.ResetTimer()
 		b.SetBytes(size)
 		for i := 0; i < b.N; i++ {
-			r := NewReader(bufio.NewReader(bytes.NewReader(data))).DotReader()
+			r := DotReader(bufio.NewReader(bytes.NewReader(data)))
 			io.Copy(io.Discard, r)
 		}
 	})
